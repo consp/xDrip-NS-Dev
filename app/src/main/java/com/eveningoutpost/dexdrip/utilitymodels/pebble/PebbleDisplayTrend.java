@@ -347,7 +347,7 @@ public class PebbleDisplayTrend extends PebbleDisplayAbstract {
 
             String trendPeriodString = PreferenceManager.getDefaultSharedPreferences(this.context).getString("pebble_trend_period", "3");
             Integer trendPeriod = Integer.parseInt(trendPeriodString);
-            Log.i(TAG, "Trend period: " + trendPeriod + " - " + lastTrendPeriod);
+            Log.d(TAG, "Trend period: " + trendPeriod + " - " + lastTrendPeriod);
             List<BgReading> readings;
             if (send_all || this.bgReadings == null) // rate limit is pointless as it's needed when switching apps/settings
             {
@@ -383,11 +383,13 @@ public class PebbleDisplayTrend extends PebbleDisplayAbstract {
                 transactionOk = false;
                 messageInTransit = true;
             } else if (JoH.ratelimit("pebble-bggraphbuilder-update",60)) {
-                Log.i(TAG, "Sending update");
+                Log.d(TAG, "Sending update");
                 // new fetch 1
                 readings = BgReading.latest(1);
                 short value  = (short) Math.round(readings.get(0).getDg_mgdl());
-                this.dictionary.addInt16(TREND_UPDATE_NEW_KEY, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(value) : value);
+                Log.d(TAG, "Update v: " + readings.get(0).getDg_mgdl() + ", " + value);
+                Log.i(TAG, "Sending TREND_UPDATE_NEW_KEY to pebble");
+                this.dictionary.addInt16(TREND_UPDATE_NEW_KEY, value); // does conversion by itself
                 sendStep = 5; // exit, only one value
             }
             pebble_trend_new_protocol = true;
