@@ -24,6 +24,7 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -65,7 +66,7 @@ public class PebbleDisplayTrend extends PebbleDisplayAbstract {
     public static final int VERSION_KEY = 1002;
     */
     private static final int CHUNK_SIZE = 100;
-    public static final boolean d = false;
+    public static final boolean d = true;
 
     private static byte last_collect_health_key_byte = 0x1A;
     private static byte last_bluetooth_key_byte = 0x1A;
@@ -88,10 +89,12 @@ public class PebbleDisplayTrend extends PebbleDisplayAbstract {
     private static String pebble_app_version = "";
     private static long pebble_sync_value = 0;
     private static long pebble_trend_size = 0;
+    private static boolean pebble_trend_new_protocol = false;
     private static boolean sentInitialSync = false;
 
     private boolean no_signal = false;
     private BgGraphBuilder bgGraphBuilder;
+    private List<BgReading> bgReadings;
     private BgReading mBgReading;
     private static short sendStep = 5;
     private final PebbleDictionary dictionary = new PebbleDictionary();
@@ -327,7 +330,70 @@ public class PebbleDisplayTrend extends PebbleDisplayAbstract {
 
         Log.i(TAG, "sendTrendToPebble called: sendStep= " + sendStep + ", messageInTransit= " + messageInTransit + //
                 ", transactionFailed= " + transactionFailed + ", sendStep= " + sendStep);
-        if (!done && (sendStep == 1 && ((!messageInTransit && !transactionOk && !transactionFailed) || //
+
+        if ((pebble_trend_size & 0x40000000) != 0 && (!done && (sendStep == 1 && ((!messageInTransit && !transactionOk && !transactionFailed) || //
+                (messageInTransit && !transactionOk && transactionFailed))))) {
+            /*
+             * Trend value request, sending x items
+             */
+            boolean send_all = false;
+            if ((pebble_trend_size & 0x20000000) != 0 || clearTrend) {
+                Log.i(TAG, "Force update: " + pebble_trend_size);
+                this.bgReadings = null;
+                pebble_trend_size &= ~0x20000000;
+                send_all = true;
+            }
+            Log.i(TAG, "Sending data blob");
+
+            String trendPeriodString = PreferenceManager.getDefaultSharedPreferences(this.context).getString("pebble_trend_period", "3");
+            Integer trendPeriod = Integer.parseInt(trendPeriodString);
+            Log.i(TAG, "Trend period: " + trendPeriod + " - " + lastTrendPeriod);
+            List<BgReading> readings;
+            if (send_all || this.bgReadings == null) // rate limit is pointless as it's needed when switching apps/settings
+            {
+                Log.i(TAG, "Sending all data");
+                long end = System.currentTimeMillis() + (60000 * 5);
+                long start = end - (60000 * 60 * trendPeriod) - (60000 * 10);
+                lastTrendPeriod = trendPeriod;
+                readings = BgReading.latestForGraph((int) pebble_trend_size & 0xFFFF, start, end);
+                if (this.bgReadings == null) this.bgReadings = readings;
+
+                // convert to uint16
+                buff = ByteBuffer.allocate(readings.size() * 2);
+                for (int i = 0; i < this.bgReadings.size(); i++) {
+                    short value = (short) Math.round(bgReadings.get(bgReadings.size() - 1 - i).getDg_mgdl());
+                    Log.d(TAG, "Trend data: " + bgReadings.get(bgReadings.size() - 1 - i).getDg_mgdl() + " value: " + value);
+                    buff.putShort(i * 2, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(value) : value); // convert endianess if need be
+                }
+                image_size = this.bgReadings.size() * 2;
+                current_size = 0;
+                //Prepare the TREND_BEGIN_KEY dictionary.  We expect the length of the image to always be less than 65535 bytes.
+                if (buff != null) {
+                    //if (this.dictionary == null) {
+                    //    this.dictionary = new PebbleDictionary();
+                    //}
+                    this.dictionary.addInt16(TREND_BEGIN_NEW_KEY, (short) (image_size / 2));
+                    Log.d(TAG, "sendTrendToPebble: Sending TREND_BEGIN_NEW_KEY to pebble, image size is " + image_size);
+                } else {
+                    Log.d(TAG, "sendTrendToPebble: Error converting stream to ByteBuffer, buff is null.");
+                    sendStep = 4;
+                    return;
+                }
+                transactionFailed = false;
+                transactionOk = false;
+                messageInTransit = true;
+            } else if (JoH.ratelimit("pebble-bggraphbuilder-update",60)) {
+                Log.i(TAG, "Sending update");
+                // new fetch 1
+                readings = BgReading.latest(1);
+                short value  = (short) Math.round(readings.get(0).getDg_mgdl());
+                this.dictionary.addInt16(TREND_UPDATE_NEW_KEY, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(value) : value);
+                sendStep = 5; // exit, only one value
+            }
+            pebble_trend_new_protocol = true;
+
+            sendDataToPebble(this.dictionary);
+        } else if (!done && (sendStep == 1 && ((!messageInTransit && !transactionOk && !transactionFailed) || //
                 (messageInTransit && !transactionOk && transactionFailed)))) {
 
             if (!messageInTransit && !transactionOk && !transactionFailed) {
@@ -428,12 +494,14 @@ public class PebbleDisplayTrend extends PebbleDisplayAbstract {
             transactionFailed = false;
             transactionOk = false;
             messageInTransit = true;
+            pebble_trend_new_protocol = false;
             sendDataToPebble(this.dictionary);
         }
 
         if (sendStep == 1 && !done && !messageInTransit && transactionOk && !transactionFailed) {
             Log.i(TAG, "sendTrendToPebble: sendStep " + sendStep + " complete.");
             this.dictionary.remove(TREND_BEGIN_KEY);
+            this.dictionary.remove(TREND_BEGIN_NEW_KEY);
             current_size = 0;
             sendStep = 2;
             transactionOk = false;
@@ -445,18 +513,25 @@ public class PebbleDisplayTrend extends PebbleDisplayAbstract {
                 if (d) Log.d(TAG, "sendTrendToPebble: current_size is " + current_size + ", image_size is " + image_size);
                 if (current_size < image_size) {
                     this.dictionary.remove(TREND_DATA_KEY);
+                    this.dictionary.remove(TREND_DATA_NEW_KEY); // remove new tag
                     if ((image_size <= (current_size + CHUNK_SIZE))) {
                         chunk = new byte[image_size - current_size];
                         if (d) Log.d(TAG, "sendTrendToPebble: sending chunk of size " + (image_size - current_size));
-                        buff.get(chunk, 0, image_size - current_size);
-                        sendStep = 3;
+                        Log.i(TAG, "T " + buff.capacity());
+                        try {
+                            buff.get(chunk, 0, image_size - current_size);
+                            sendStep = 3;
+                        } catch(java.nio.BufferUnderflowException e) {
+                            Log.i(TAG, "Failed to do things");
+                            sendStep = 5;
+                        }
                     } else {
                         chunk = new byte[CHUNK_SIZE];
                         if (d) Log.d(TAG, "sendTrendToPebble: sending chunk of size " + CHUNK_SIZE);
                         buff.get(chunk, 0, CHUNK_SIZE);
                         current_size += CHUNK_SIZE;
                     }
-                    this.dictionary.addBytes(TREND_DATA_KEY, chunk);
+                    this.dictionary.addBytes(pebble_trend_new_protocol ? TREND_DATA_NEW_KEY : TREND_DATA_KEY, chunk);
                 }
             }
             Log.d(TAG, "sendTrendToPebble: Sending TREND_DATA_KEY to pebble, current_size is " + current_size);
@@ -469,6 +544,7 @@ public class PebbleDisplayTrend extends PebbleDisplayAbstract {
         if (sendStep == 3 && !done && !messageInTransit && transactionOk && !transactionFailed) {
             Log.i(TAG, "sendTrendToPebble: sendStep " + sendStep + " complete.");
             this.dictionary.remove(TREND_DATA_KEY);
+            this.dictionary.remove(TREND_DATA_NEW_KEY);
             sendStep = 4;
             transactionOk = false;
             buff = null;
@@ -479,7 +555,7 @@ public class PebbleDisplayTrend extends PebbleDisplayAbstract {
                 (messageInTransit && !transactionOk && transactionFailed)))) {
             if (!transactionFailed) {
                 // prepare the TREND_END_KEY dictionary and send it.
-                this.dictionary.addUint8(TREND_END_KEY, (byte) 0);
+                this.dictionary.addUint8(pebble_trend_new_protocol ? TREND_END_NEW_KEY : TREND_END_KEY, (byte) 0);
                 Log.d(TAG, "sendTrendToPebble: Sending TREND_END_KEY to pebble.");
             }
 
@@ -492,6 +568,7 @@ public class PebbleDisplayTrend extends PebbleDisplayAbstract {
         if (sendStep == 4 && !done && transactionOk && !messageInTransit && !transactionFailed) {
             Log.i(TAG, "sendTrendToPebble: sendStep " + sendStep + " complete.");
             this.dictionary.remove(TREND_END_KEY);
+            this.dictionary.remove(TREND_END_NEW_KEY);
             sendStep = 5;
             transactionFailed = false;
             transactionOk = false;
