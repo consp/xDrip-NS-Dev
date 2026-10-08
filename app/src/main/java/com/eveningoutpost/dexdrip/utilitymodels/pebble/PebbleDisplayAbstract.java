@@ -78,6 +78,7 @@ public abstract class PebbleDisplayAbstract implements PebbleDisplayInterface {
     protected static final int FRAMEWORK_HEALTH_HR = 2015;
     protected static final int FRAMEWORK_HEALTH_STEPS = 2015;
     protected static final int FRAMEWORK_TREATMENT = 2015;
+    protected static final int FRAMEWORK_ALERT_SNOOZE = 2016;
 
 
 

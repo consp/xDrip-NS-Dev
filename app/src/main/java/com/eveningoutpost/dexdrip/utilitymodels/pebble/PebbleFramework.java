@@ -12,6 +12,7 @@ import android.preference.PreferenceManager;
 
 import com.eveningoutpost.dexdrip.BestGlucose;
 import com.eveningoutpost.dexdrip.Home;
+import com.eveningoutpost.dexdrip.SnoozeActivity;
 import com.eveningoutpost.dexdrip.cgm.medtrum.SensorState;
 import com.eveningoutpost.dexdrip.g5model.DexSessionKeeper;
 import com.eveningoutpost.dexdrip.insulin.Insulin;
@@ -25,6 +26,7 @@ import com.eveningoutpost.dexdrip.models.Treatments;
 import com.eveningoutpost.dexdrip.models.UserError.Log;
 import com.eveningoutpost.dexdrip.services.G5CollectionService;
 import com.eveningoutpost.dexdrip.services.Ob1G5CollectionService;
+import com.eveningoutpost.dexdrip.utilitymodels.AlertPlayer;
 import com.eveningoutpost.dexdrip.utilitymodels.BgGraphBuilder;
 import com.eveningoutpost.dexdrip.utilitymodels.BgSparklineBuilder;
 import com.eveningoutpost.dexdrip.utilitymodels.Constants;
@@ -231,8 +233,10 @@ public class PebbleFramework extends PebbleDisplayAbstract {
                 message = "End: " + hoursLeft + ":" + String.format("%02d", minutesLeft) + "h";
             } else if (minutesLeft > 0) {
                 message = "End: " + minutesLeft + " min";
-            } else {
+            } else if (SensorDays.get().getStart() != 0) { // 0 start time means follower
                 message = "Sensor exp.";
+            } else {
+                message = "";
             }
         } else if(SensorDays.get().isValid() && (Ob1G5CollectionService.isG5WarmingUp() || (Ob1G5CollectionService.isPendingStart())) && !Ob1G5CollectionService.isCollecting()) {
             double timeleft = (SensorDays.get().getWarmupMs() - JoH.msSince(SensorDays.get().getStart())) / 60000.0;
@@ -379,15 +383,57 @@ public class PebbleFramework extends PebbleDisplayAbstract {
         long now = (long) (new Date().getTime() / 1000.0);
         long end = (long) (now + (SensorDays.get().getRemainingSensorPeriodInMs() / 1000.0));
         short interval = (short)(DexCollectionType.getCurrentSamplePeriod() / (long) 1000);
-        byte state = (byte) 255;
+        byte state = (byte) 0;
         if (end < now) state = 2; // expired
         else if ((SensorDays.get().getWarmupMs() - JoH.msSince(SensorDays.get().getStart())) > 0) state = 1; // warmup
         else if (start > 0 && SensorDays.get().isValid()) state = 0; // active and valid
-        buff = ByteBuffer.allocate(11);
+
+        switch (DexCollectionType.getDexCollectionType()) {
+            case DexcomG5:
+            case DexbridgeWixel:
+            case DexcomG6:
+            case WifiDexBridgeWixel:
+            case AidexReceiver:
+            case DexcomShare:
+                state |= (byte) (0x01 << 4);
+                break;
+            case Follower:
+            case NSFollow:
+            case SHFollow:
+            case WebFollow:
+            case CLFollow:
+                state |= (byte) (0x03 << 4);
+                break;
+            case LibreWifi:
+            case LibreAlarm:
+            case LibreReceiver:
+                state |= (byte) (0x02 << 4);
+                break;
+            case NSEmulator:
+            case WifiBlueToothWixel:
+            case WifiWixel:
+            case LimiTTerWifi:
+            case BluetoothWixel:
+            case Mock:
+            case Manual:
+            case Medtrum:
+            case GluPro:
+            case None:
+            case Disabled:
+            case UiBased:
+            case LimiTTer:
+            default:
+                state |= (byte) (0x0F << 4);
+                break;
+        }
+        short warmup_time = (short) (SensorDays.get().getWarmupMs() / 1000);
+
+        buff = ByteBuffer.allocate(13);
         buff.putInt(0, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Integer.reverseBytes((int) start) : (int) start);
         buff.putInt(4, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Integer.reverseBytes((int) end) : (int) end);
         buff.put(8, state);
         buff.putShort(9, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes((short) interval) : (short) interval);
+        buff.putShort(11, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes((short) warmup_time) : (short) warmup_time);
         dict.addBytes(FRAMEWORK_SENSOR_INFO, buff.array());
 
         return dict;
@@ -593,6 +639,33 @@ public class PebbleFramework extends PebbleDisplayAbstract {
                 if (basal != 0 || bolus != 0 || carbs != 0) Home.staticRefreshBGCharts(); // refresh home
                 Log.i(TAG, "Treatment: " + carbs + " carbs, " + bolus + " bolus, " + basal + " basal");
                 Log.i(TAG, "Treatment created: " + t.toString());
+            }
+
+            if (data.contains(FRAMEWORK_ALERT_SNOOZE)) {
+
+                /* note: settings and alert dismissal has NOT been enabled but this is included for when it is */
+
+                Log.i(TAG, "Alert snooze start");
+                // read data { basal, bolus, 2x carbs }
+                byte[] bytes = data.getBytes(FRAMEWORK_TREATMENT);
+                int duration = ByteBuffer.wrap(Arrays.copyOfRange(bytes, 0, 2)).order(ByteOrder.LITTLE_ENDIAN).getShort();
+                short settings = ByteBuffer.wrap(Arrays.copyOfRange(bytes, 2, 4)).order(ByteOrder.LITTLE_ENDIAN).getShort();
+                boolean low_alert = (settings & 0x0001) != 0;
+                boolean high_alert = (settings & 0x0002) != 0;
+                boolean all_alerts = (low_alert && high_alert);
+                boolean dismiss = (settings & 0x0004) != 0;
+                Log.d(TAG, "Snooze for " + duration + " minutes");
+                ActiveBgAlert active = ActiveBgAlert.getOnly();
+                if (!dismiss && active != null && duration != 0) {
+                    // trigger snooze button for active alert
+                    AlertPlayer.getPlayer().Snooze(this.context.getApplicationContext(), duration);
+                } else if (dismiss && duration != 0) {
+                    // dismiss some type of alert
+                    SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this.context.getApplicationContext());
+                    if (low_alert && !all_alerts) SnoozeActivity.snoozeForType(duration, SnoozeActivity.SnoozeType.LOW_ALERTS, prefs);
+                    if (high_alert && !all_alerts) SnoozeActivity.snoozeForType(duration, SnoozeActivity.SnoozeType.HIGH_ALERTS, prefs);
+                    if (all_alerts) SnoozeActivity.snoozeForType(duration, SnoozeActivity.SnoozeType.ALL_ALERTS, prefs);
+                }
             }
         } catch (NullPointerException e) {
             Log.e(TAG, "Got exception trying to parse data from pebble: " + e);
