@@ -555,42 +555,76 @@ public class PebbleFramework extends PebbleDisplayAbstract {
                     long timestamp = data.getUnsignedIntegerAsLong(FRAMEWORK_BGL_VALUE);
                     //String trendPeriodString = PreferenceManager.getDefaultSharedPreferences(this.context).getString("pebble_trend_period", "3");
                     String trendPeriodString = this.context.getApplicationContext().getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE).getString("pebble_trend_period", "3");
-                    int trendPeriod = Integer.parseInt(trendPeriodString);
+                    int trendPeriod = Integer.parseInt(trendPeriodString) + 1;
+                    long interval = (DexCollectionType.getCurrentSamplePeriod() / (long) 1000);
+                    int expectedItems = (int) ((int)trendPeriod * 3600) / (int)interval;
+                    Log.i(TAG, "Trend interval: " + interval + " items: " + expectedItems);
                     Log.d(TAG, "Trend period: " + trendPeriod + " - " + lastTrendPeriod + " Since: " + timestamp);
 
                     long end = System.currentTimeMillis() + (60000 * 5);
-                    long start = timestamp == 0 ? end - (60000 * 60 * trendPeriod) - (60000 * 10) : (timestamp * 1000) - (4 * 60000);
+                    long start = timestamp == 0 ? end - (3600000 * trendPeriod) - (((interval * 1000) - 5000)) : (timestamp * 1000) - ((interval * 1000) - 5000);
+                    Log.d(TAG, "Trend period from " + start + " to " + end);
                     lastTrendPeriod = trendPeriod;
-                    List<BgReading> readings = BgReading.latestForGraph(200, start, end);
+                    List<BgReading> readings = BgReading.latestForGraph(260, start, end);
                     try {
                         last_seen_timestamp = readings.get(0).timestamp / 1000;
 
                         Log.d(TAG, "Trend size: " + readings.size());
                         boolean ismmol = !Pref.getString("units", "mgdl").equals("mgdl");
-                        // strip known (timestamp is a known value)
+                        if (readings.size() == 48) readings.remove(12);
+                        // strip known (timestamp is a known value or zero)
                         if (readings.get(readings.size() - 1).timestamp / 1000 == timestamp)
                             readings.remove(readings.size() - 1); // check if oldest is the timestamp
                         if (readings.size() > 1 && time_series) {
+                            Log.i(TAG, "Sending time series");
+                            // Check if readings number matches the expected value, otherwise add zeroes for missing
                             // convert to uint16
-                            buff = ByteBuffer.allocate(4 + 2 + readings.size() * 2);
+                            buff = ByteBuffer.allocate(4 + 2 + expectedItems * 2);
                             int ts = (int) (readings.get(0).timestamp / 1000);
                             buff.putInt(0, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Integer.reverseBytes(ts) : ts);
                             short length = (short) readings.size();
-                            if (!doWeDisplayTrendData()) length |= 0x8000;
-                            buff.putShort(4, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(length) : length);
-                            for (int i = 0; i < readings.size(); i++) {
-                                short value = (short) Math.round(readings.get(readings.size() - 1 - i).getDg_mgdl());
-                                Log.d(TAG, "Trend data: " + readings.get(readings.size() - 1 - i).getDg_mgdl() + " value: " + value + " - Time: " + readings.get(readings.size() - 1 - i).timestamp / 1000);
+
+                            short items = 0;
+                            Log.d(TAG, "Starting trend log");
+                            // add all values + spaces
+                            for (int i = readings.size() - 1; i > 0 && items < expectedItems - 1; i--) {
+                                BgReading current = readings.get(i);
+                                BgReading next = readings.get(i - 1);
+                                short value = (short) Math.round(current.getDg_mgdl());
+
+                                Log.d(TAG, "Trend data: " + current.getDg_mgdl() + " value: " + value + " - Time: " + current.timestamp / 1000 + " diff " + ((next.timestamp - current.timestamp) / 1000) + " items " + items + " loc " + i + " expected " + expectedItems + " size " + readings.size());
+
                                 if (ismmol) value |= 0x8000;
-                                buff.putShort(6 + i * 2, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(value) : value); // convert endianess if need be
+                                buff.putShort(6 + items * 2, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(value) : value); // convert endianess if need be
+                                items++;
+                                long span = (next.timestamp - current.timestamp) / 1000;
+                                if (span > interval + 30) { // check if there is one or more missing
+                                    for (int y = 0; y < ((span + 30) / interval) - 1; y++) { // strip one (10 min interval is one missing item), since the interval can be a few seconds short add a bit of time
+                                        Log.d(TAG, "Added space");
+                                        value = ismmol ? (short) 0x8000 : (short) 0;
+                                        buff.putShort(6 + items * 2, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(value) : value); // convert endianess if need be
+                                        items++;
+                                    }
+                                }
                             }
+                            // last value
+                            short value = (short) Math.round(readings.get(0).getDg_mgdl());
+                            if (ismmol) value |= 0x8000;
+                            buff.putShort(6 + items * 2, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(value) : value); // convert endianess if need be
+                            items++;
+                            if (!doWeDisplayTrendData()) items |= 0x8000;
+                            buff.putShort(4, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(items) : items);
                             dict.addBytes(FRAMEWORK_BGL_SERIES, buff.array());
-                            Log.d(TAG, "Sending bgl series");
+                            Log.d(TAG, "Sending trend series");
+                            Log.i(TAG, "Send " + items + " items while being provided " + length + " items while expecting " + expectedItems);
                         } else if (readings.size() == 1 || !time_series) {
+                            Log.i(TAG, "Sending BGL Value");
                             sendBgl(dict, readings.get(0));
                         }
                     } catch (java.lang.IndexOutOfBoundsException e) {
-                        // no data
+                        // something happened
+                        Log.e(TAG, "Cannot complete");
+                        Log.e(TAG, "Error: ", e);
                     }
 
                 }
@@ -647,7 +681,7 @@ public class PebbleFramework extends PebbleDisplayAbstract {
 
                 Log.i(TAG, "Alert snooze start");
                 // read data { basal, bolus, 2x carbs }
-                byte[] bytes = data.getBytes(FRAMEWORK_TREATMENT);
+                byte[] bytes = data.getBytes(FRAMEWORK_ALERT_SNOOZE);
                 int duration = ByteBuffer.wrap(Arrays.copyOfRange(bytes, 0, 2)).order(ByteOrder.LITTLE_ENDIAN).getShort();
                 short settings = ByteBuffer.wrap(Arrays.copyOfRange(bytes, 2, 4)).order(ByteOrder.LITTLE_ENDIAN).getShort();
                 boolean low_alert = (settings & 0x0001) != 0;
