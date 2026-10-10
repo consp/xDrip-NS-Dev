@@ -222,9 +222,13 @@ public class PebbleFramework extends PebbleDisplayAbstract {
     private PebbleDictionary sendMessage(PebbleDictionary dict) {
         long timeLeft = SensorDays.get().getRemainingSensorPeriodInMs();
         String message = null;
+        SharedPreferences prefs = context.getApplicationContext().getSharedPreferences(context.getPackageName()+"_preferences", Context.MODE_PRIVATE);
+
+        String msg = prefs.getString("pebble_special_value", "");
+        Log.d(TAG, "sendMessage: msg = " + msg + ", getBgReading = "+ getBgReading() + ", pebble_special_text = "+ prefs.getString("pebble_special_text", ""));
         Log.d(TAG, "sendMessage: sensorDays.isvalid = " + SensorDays.get().isValid() + ", isG5WarmingUp = " + Ob1G5CollectionService.isG5WarmingUp() + ", isPendingStart = " + Ob1G5CollectionService.isPendingStart() + ", isCollecting = " +  Ob1G5CollectionService.isCollecting());
-        if (getBgReading().equalsIgnoreCase(this.context.getApplicationContext().getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE).getString("pebble_special_value", ""))) {
-            message =  this.context.getApplicationContext().getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE).getString("pebble_special_text", "BAZINGA!");
+        if (getBgReading().equalsIgnoreCase(msg)) {
+            message =  prefs.getString("pebble_special_text", "BAZINGA!");
         } else if(timeLeft < (24*3600000)) { // less than a day left
             long hoursLeft = Math.toIntExact(timeLeft / 3600000);
             int minutesLeft = Math.toIntExact((timeLeft - (hoursLeft * 3600000)) / 60000);
@@ -442,7 +446,7 @@ public class PebbleFramework extends PebbleDisplayAbstract {
     private PebbleDictionary sendHighLimit(PebbleDictionary dict, boolean force) {
         boolean highLine = getBooleanValue("pebble_high_line");
         //SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
-        SharedPreferences prefs = this.context.getApplicationContext().getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE);
+        SharedPreferences prefs = this.context.getApplicationContext().getSharedPreferences(context.getPackageName()+"_preferences", Context.MODE_PRIVATE);
         short high_line = 0;
         // the hig/low line values are set as strings and can thus be in mmol/l
         if (!highLine) {
@@ -466,7 +470,7 @@ public class PebbleFramework extends PebbleDisplayAbstract {
 
     private PebbleDictionary sendLowLimit(PebbleDictionary dict, boolean force) {
         boolean lowLine = getBooleanValue("pebble_low_line");
-        SharedPreferences prefs = this.context.getApplicationContext().getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE);
+        SharedPreferences prefs = this.context.getApplicationContext().getSharedPreferences(context.getPackageName()+"_preferences", Context.MODE_PRIVATE);
         short low_line = 0;
         if (!lowLine) {
             low_line = 0;
@@ -559,6 +563,7 @@ public class PebbleFramework extends PebbleDisplayAbstract {
                     long interval = (DexCollectionType.getCurrentSamplePeriod() / (long) 1000);
                     int expectedItems = (int) ((int)trendPeriod * 3600) / (int)interval;
                     Log.i(TAG, "Trend interval: " + interval + " items: " + expectedItems);
+
                     Log.d(TAG, "Trend period: " + trendPeriod + " - " + lastTrendPeriod + " Since: " + timestamp);
 
                     long end = System.currentTimeMillis() + (60000 * 5);
@@ -713,7 +718,7 @@ public class PebbleFramework extends PebbleDisplayAbstract {
         boolean highLine = getBooleanValue("pebble_high_line");
         boolean lowLine = getBooleanValue("pebble_low_line");
 
-        String trendPeriodString = this.context.getApplicationContext().getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE).getString("pebble_trend_period", "3");
+        String trendPeriodString = this.context.getApplicationContext().getSharedPreferences(context.getPackageName()+"_preferences", Context.MODE_PRIVATE).getString("pebble_trend_period", "3");
         Integer trendPeriod = Integer.parseInt(trendPeriodString);
 
         if ((trendPeriod != lastTrendPeriod) || (JoH.ratelimit("pebble-bggraphbuilder",60)))
@@ -799,7 +804,7 @@ public class PebbleFramework extends PebbleDisplayAbstract {
                 boolean highLine = getBooleanValue("pebble_high_line");
                 boolean lowLine = getBooleanValue("pebble_low_line");
 
-                String trendPeriodString = this.context.getApplicationContext().getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE).getString("pebble_trend_period", "3");
+                String trendPeriodString = this.context.getApplicationContext().getSharedPreferences(context.getPackageName()+"_preferences", Context.MODE_PRIVATE).getString("pebble_trend_period", "3");
                 Integer trendPeriod = Integer.parseInt(trendPeriodString);
 
                 if ((trendPeriod != lastTrendPeriod) || (JoH.ratelimit("pebble-bggraphbuilder",60)))
