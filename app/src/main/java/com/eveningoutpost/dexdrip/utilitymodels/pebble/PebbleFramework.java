@@ -12,14 +12,21 @@ import android.preference.PreferenceManager;
 
 import com.eveningoutpost.dexdrip.BestGlucose;
 import com.eveningoutpost.dexdrip.Home;
+import com.eveningoutpost.dexdrip.SnoozeActivity;
 import com.eveningoutpost.dexdrip.cgm.medtrum.SensorState;
 import com.eveningoutpost.dexdrip.g5model.DexSessionKeeper;
+import com.eveningoutpost.dexdrip.insulin.Insulin;
+import com.eveningoutpost.dexdrip.insulin.InsulinManager;
 import com.eveningoutpost.dexdrip.models.ActiveBgAlert;
 import com.eveningoutpost.dexdrip.models.BgReading;
+import com.eveningoutpost.dexdrip.models.InsulinInjection;
 import com.eveningoutpost.dexdrip.models.JoH;
 import com.eveningoutpost.dexdrip.models.Sensor;
+import com.eveningoutpost.dexdrip.models.Treatments;
 import com.eveningoutpost.dexdrip.models.UserError.Log;
+import com.eveningoutpost.dexdrip.services.G5CollectionService;
 import com.eveningoutpost.dexdrip.services.Ob1G5CollectionService;
+import com.eveningoutpost.dexdrip.utilitymodels.AlertPlayer;
 import com.eveningoutpost.dexdrip.utilitymodels.BgGraphBuilder;
 import com.eveningoutpost.dexdrip.utilitymodels.BgSparklineBuilder;
 import com.eveningoutpost.dexdrip.utilitymodels.Constants;
@@ -27,6 +34,7 @@ import com.eveningoutpost.dexdrip.utilitymodels.Pref;
 import com.eveningoutpost.dexdrip.utilitymodels.SensorStatus;
 import com.eveningoutpost.dexdrip.utilitymodels.SimpleImageEncoder;
 import com.eveningoutpost.dexdrip.g5model.SensorDays;
+import com.eveningoutpost.dexdrip.utils.DexCollectionType;
 import com.getpebble.android.kit.PebbleKit;
 import com.getpebble.android.kit.util.PebbleDictionary;
 import com.getpebble.android.kit.util.PebbleTuple;
@@ -39,6 +47,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.Dictionary;
 import java.util.List;
@@ -52,6 +61,8 @@ import android.content.Intent;
 import android.os.Bundle;
 
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
+
+import org.nightscoutfoundation.nocturne.model.Treatment;
 
 
 /**
@@ -226,8 +237,10 @@ public class PebbleFramework extends PebbleDisplayAbstract {
                 message = "End: " + hoursLeft + ":" + String.format("%02d", minutesLeft) + "h";
             } else if (minutesLeft > 0) {
                 message = "End: " + minutesLeft + " min";
-            } else {
+            } else if (SensorDays.get().getStart() != 0) { // 0 start time means follower
                 message = "Sensor exp.";
+            } else {
+                message = "";
             }
         } else if(SensorDays.get().isValid() && (Ob1G5CollectionService.isG5WarmingUp() || (Ob1G5CollectionService.isPendingStart())) && !Ob1G5CollectionService.isCollecting()) {
             double timeleft = (SensorDays.get().getWarmupMs() - JoH.msSince(SensorDays.get().getStart())) / 60000.0;
@@ -243,11 +256,7 @@ public class PebbleFramework extends PebbleDisplayAbstract {
         return dict;
     }
 
-    private PebbleDictionary sendSensorRemaining(PebbleDictionary dict) {
-        long TimeLeft = (long) (SensorDays.get().getRemainingSensorPeriodInMs() / 1000.0);
-        dict.addUint32(FRAMEWORK_SENSOR_TIME_LEFT, (int) TimeLeft);
-        return dict;
-    }
+
     private PebbleDictionary sendVibe(PebbleDictionary dict) {
         no_signal = ((new Date().getTime()) - Home.stale_data_millis() - this.bgReading.timestamp > 0);
 
@@ -372,6 +381,68 @@ public class PebbleFramework extends PebbleDisplayAbstract {
         return dict;
     }
 
+    private PebbleDictionary sendSensorInfo(PebbleDictionary dict) {
+        Log.d(TAG, "Sensor data: " + SensorDays.get().getStart());
+        long start = (long) (SensorDays.get().getStart() / 1000.0);
+        long now = (long) (new Date().getTime() / 1000.0);
+        long end = (long) (now + (SensorDays.get().getRemainingSensorPeriodInMs() / 1000.0));
+        short interval = (short)(DexCollectionType.getCurrentSamplePeriod() / (long) 1000);
+        byte state = (byte) 0;
+        if (end < now) state = 2; // expired
+        else if ((SensorDays.get().getWarmupMs() - JoH.msSince(SensorDays.get().getStart())) > 0) state = 1; // warmup
+        else if (start > 0 && SensorDays.get().isValid()) state = 0; // active and valid
+
+        switch (DexCollectionType.getDexCollectionType()) {
+            case DexcomG5:
+            case DexbridgeWixel:
+            case DexcomG6:
+            case WifiDexBridgeWixel:
+            case AidexReceiver:
+            case DexcomShare:
+                state |= (byte) (0x01 << 4);
+                break;
+            case Follower:
+            case NSFollow:
+            case SHFollow:
+            case WebFollow:
+            case CLFollow:
+                state |= (byte) (0x03 << 4);
+                break;
+            case LibreWifi:
+            case LibreAlarm:
+            case LibreReceiver:
+                state |= (byte) (0x02 << 4);
+                break;
+            case NSEmulator:
+            case WifiBlueToothWixel:
+            case WifiWixel:
+            case LimiTTerWifi:
+            case BluetoothWixel:
+            case Mock:
+            case Manual:
+            case Medtrum:
+            case GluPro:
+            case None:
+            case Disabled:
+            case UiBased:
+            case LimiTTer:
+            default:
+                state |= (byte) (0x0F << 4);
+                break;
+        }
+        short warmup_time = (short) (SensorDays.get().getWarmupMs() / 1000);
+
+        buff = ByteBuffer.allocate(13);
+        buff.putInt(0, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Integer.reverseBytes((int) start) : (int) start);
+        buff.putInt(4, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Integer.reverseBytes((int) end) : (int) end);
+        buff.put(8, state);
+        buff.putShort(9, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes((short) interval) : (short) interval);
+        buff.putShort(11, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes((short) warmup_time) : (short) warmup_time);
+        dict.addBytes(FRAMEWORK_SENSOR_INFO, buff.array());
+
+        return dict;
+    }
+
     private PebbleDictionary sendHighLimit(PebbleDictionary dict, boolean force) {
         boolean highLine = getBooleanValue("pebble_high_line");
         //SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
@@ -452,7 +523,7 @@ public class PebbleFramework extends PebbleDisplayAbstract {
                 boolean send_pump_battery = (hb & 0x00200000) != 0;
                 boolean send_delta_value = (hb & 0x00100000) != 0;
                 boolean send_slope_arrow = (hb & 0x00080000) != 0;
-                boolean send_sensor_expiry = (hb & 0x00040000) != 0;
+                boolean send_sensor_info = (hb & 0x00040000) != 0;
                 Log.d(TAG, "Framework heartbeat: Colour=" + colour
                         + " time_series=" + time_series
                         + " time_period=" + time_period
@@ -465,12 +536,12 @@ public class PebbleFramework extends PebbleDisplayAbstract {
                         + " send_delta_value=" + send_delta_value
                         + " send_slope_arrow=" + send_slope_arrow
                         + " send_phone_battery=" + send_phone_battery
-                        + " send_sensor_expiry=" + send_sensor_expiry
+                        + " send_sensor_info=" + send_sensor_info
                 );
 
                 PebbleDictionary dict = new PebbleDictionary();
 
-                if (send_sensor_expiry) sendSensorRemaining((dict));
+                if (send_sensor_info) sendSensorInfo((dict));
 
                 if (send_slope_arrow) sendSlope(dict, bgReading);
 
@@ -487,43 +558,78 @@ public class PebbleFramework extends PebbleDisplayAbstract {
                 if (data.contains(FRAMEWORK_BGL_VALUE)) {
                     long timestamp = data.getUnsignedIntegerAsLong(FRAMEWORK_BGL_VALUE);
                     //String trendPeriodString = PreferenceManager.getDefaultSharedPreferences(this.context).getString("pebble_trend_period", "3");
-                    String trendPeriodString = this.context.getApplicationContext().getSharedPreferences(context.getPackageName()+"_preferences", Context.MODE_PRIVATE).getString("pebble_trend_period", "3");
-                    int trendPeriod = Integer.parseInt(trendPeriodString);
+                    String trendPeriodString = this.context.getApplicationContext().getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE).getString("pebble_trend_period", "3");
+                    int trendPeriod = Integer.parseInt(trendPeriodString) + 1;
+                    long interval = (DexCollectionType.getCurrentSamplePeriod() / (long) 1000);
+                    int expectedItems = (int) ((int)trendPeriod * 3600) / (int)interval;
+                    Log.i(TAG, "Trend interval: " + interval + " items: " + expectedItems);
+
                     Log.d(TAG, "Trend period: " + trendPeriod + " - " + lastTrendPeriod + " Since: " + timestamp);
 
                     long end = System.currentTimeMillis() + (60000 * 5);
-                    long start = timestamp == 0 ? end - (60000 * 60 * trendPeriod) - (60000 * 10) : (timestamp * 1000) - (4 * 60000);
+                    long start = timestamp == 0 ? end - (3600000 * trendPeriod) - (((interval * 1000) - 5000)) : (timestamp * 1000) - ((interval * 1000) - 5000);
+                    Log.d(TAG, "Trend period from " + start + " to " + end);
                     lastTrendPeriod = trendPeriod;
-                    List<BgReading> readings = BgReading.latestForGraph(200, start, end);
+                    List<BgReading> readings = BgReading.latestForGraph(260, start, end);
                     try {
                         last_seen_timestamp = readings.get(0).timestamp / 1000;
 
                         Log.d(TAG, "Trend size: " + readings.size());
                         boolean ismmol = !Pref.getString("units", "mgdl").equals("mgdl");
-                        // strip known (timestamp is a known value)
+                        if (readings.size() == 48) readings.remove(12);
+                        // strip known (timestamp is a known value or zero)
                         if (readings.get(readings.size() - 1).timestamp / 1000 == timestamp)
                             readings.remove(readings.size() - 1); // check if oldest is the timestamp
                         if (readings.size() > 1 && time_series) {
+                            Log.i(TAG, "Sending time series");
+                            // Check if readings number matches the expected value, otherwise add zeroes for missing
                             // convert to uint16
-                            buff = ByteBuffer.allocate(4 + 2 + readings.size() * 2);
+                            buff = ByteBuffer.allocate(4 + 2 + expectedItems * 2);
                             int ts = (int) (readings.get(0).timestamp / 1000);
                             buff.putInt(0, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Integer.reverseBytes(ts) : ts);
                             short length = (short) readings.size();
-                            if (!doWeDisplayTrendData()) length |= 0x8000;
-                            buff.putShort(4, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(length) : length);
-                            for (int i = 0; i < readings.size(); i++) {
-                                short value = (short) Math.round(readings.get(readings.size() - 1 - i).getDg_mgdl());
-                                Log.d(TAG, "Trend data: " + readings.get(readings.size() - 1 - i).getDg_mgdl() + " value: " + value + " - Time: " + readings.get(readings.size() - 1 - i).timestamp / 1000);
+
+                            short items = 0;
+                            Log.d(TAG, "Starting trend log");
+                            // add all values + spaces
+                            for (int i = readings.size() - 1; i > 0 && items < expectedItems - 1; i--) {
+                                BgReading current = readings.get(i);
+                                BgReading next = readings.get(i - 1);
+                                short value = (short) Math.round(current.getDg_mgdl());
+
+                                Log.d(TAG, "Trend data: " + current.getDg_mgdl() + " value: " + value + " - Time: " + current.timestamp / 1000 + " diff " + ((next.timestamp - current.timestamp) / 1000) + " items " + items + " loc " + i + " expected " + expectedItems + " size " + readings.size());
+
                                 if (ismmol) value |= 0x8000;
-                                buff.putShort(6 + i * 2, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(value) : value); // convert endianess if need be
+                                buff.putShort(6 + items * 2, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(value) : value); // convert endianess if need be
+                                items++;
+                                long span = (next.timestamp - current.timestamp) / 1000;
+                                if (span > interval + 30) { // check if there is one or more missing
+                                    for (int y = 0; y < ((span + 30) / interval) - 1; y++) { // strip one (10 min interval is one missing item), since the interval can be a few seconds short add a bit of time
+                                        Log.d(TAG, "Added space");
+                                        value = ismmol ? (short) 0x8000 : (short) 0;
+                                        buff.putShort(6 + items * 2, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(value) : value); // convert endianess if need be
+                                        items++;
+                                    }
+                                }
                             }
+                            // last value
+                            short value = (short) Math.round(readings.get(0).getDg_mgdl());
+                            if (ismmol) value |= 0x8000;
+                            buff.putShort(6 + items * 2, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(value) : value); // convert endianess if need be
+                            items++;
+                            if (!doWeDisplayTrendData()) items |= 0x8000;
+                            buff.putShort(4, ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN ? Short.reverseBytes(items) : items);
                             dict.addBytes(FRAMEWORK_BGL_SERIES, buff.array());
-                            Log.d(TAG, "Sending bgl series");
+                            Log.d(TAG, "Sending trend series");
+                            Log.i(TAG, "Send " + items + " items while being provided " + length + " items while expecting " + expectedItems);
                         } else if (readings.size() == 1 || !time_series) {
+                            Log.i(TAG, "Sending BGL Value");
                             sendBgl(dict, readings.get(0));
                         }
                     } catch (java.lang.IndexOutOfBoundsException e) {
-                        // no data
+                        // something happened
+                        Log.e(TAG, "Cannot complete");
+                        Log.e(TAG, "Error: ", e);
                     }
 
                 }
@@ -543,6 +649,62 @@ public class PebbleFramework extends PebbleDisplayAbstract {
 
             } else {
                 Log.d(TAG, "receiveData: pebble_app_version not known");
+            }
+
+            if (data.contains(FRAMEWORK_TREATMENT)) {
+                Log.i(TAG, "Trestment start");
+                // read data { basal, bolus, 2x carbs }
+                byte[] bytes = data.getBytes(FRAMEWORK_TREATMENT);
+
+                // note: for simplicity the last 4 bits are the decimal value (1/16 scale)
+                // This is not true for carbs
+                double basal = (double) ByteBuffer.wrap(Arrays.copyOfRange(bytes, 0, 2)).order(ByteOrder.LITTLE_ENDIAN).getShort() / 16.0;
+                double bolus = (double) ByteBuffer.wrap(Arrays.copyOfRange(bytes, 2, 4)).order(ByteOrder.LITTLE_ENDIAN).getShort() / 16.0;
+                double carbs = (double) ByteBuffer.wrap(Arrays.copyOfRange(bytes, 4, 6)).order(ByteOrder.LITTLE_ENDIAN).getShort();
+
+                final List<InsulinInjection> injections = new ArrayList<>();
+
+                if (basal != 0) {
+                    final Insulin basal_insulin = InsulinManager.getBasalProfile();
+                    injections.add(new InsulinInjection(basal_insulin, basal));
+                }
+                if (basal != 0) {
+                    final Insulin bolus_insulin = InsulinManager.getBolusProfile();
+                    injections.add(new InsulinInjection(bolus_insulin, bolus));
+                }
+
+                Treatments t = Treatments.create(carbs, bolus + basal, injections, JoH.tsl());
+
+                if (basal != 0 || bolus != 0 || carbs != 0) Home.staticRefreshBGCharts(); // refresh home
+                Log.i(TAG, "Treatment: " + carbs + " carbs, " + bolus + " bolus, " + basal + " basal");
+                Log.i(TAG, "Treatment created: " + t.toString());
+            }
+
+            if (data.contains(FRAMEWORK_ALERT_SNOOZE)) {
+
+                /* note: settings and alert dismissal has NOT been enabled but this is included for when it is */
+
+                Log.i(TAG, "Alert snooze start");
+                // read data { basal, bolus, 2x carbs }
+                byte[] bytes = data.getBytes(FRAMEWORK_ALERT_SNOOZE);
+                int duration = ByteBuffer.wrap(Arrays.copyOfRange(bytes, 0, 2)).order(ByteOrder.LITTLE_ENDIAN).getShort();
+                short settings = ByteBuffer.wrap(Arrays.copyOfRange(bytes, 2, 4)).order(ByteOrder.LITTLE_ENDIAN).getShort();
+                boolean low_alert = (settings & 0x0001) != 0;
+                boolean high_alert = (settings & 0x0002) != 0;
+                boolean all_alerts = (low_alert && high_alert);
+                boolean dismiss = (settings & 0x0004) != 0;
+                Log.d(TAG, "Snooze for " + duration + " minutes");
+                ActiveBgAlert active = ActiveBgAlert.getOnly();
+                if (!dismiss && active != null && duration != 0) {
+                    // trigger snooze button for active alert
+                    AlertPlayer.getPlayer().Snooze(this.context.getApplicationContext(), duration);
+                } else if (dismiss && duration != 0) {
+                    // dismiss some type of alert
+                    SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this.context.getApplicationContext());
+                    if (low_alert && !all_alerts) SnoozeActivity.snoozeForType(duration, SnoozeActivity.SnoozeType.LOW_ALERTS, prefs);
+                    if (high_alert && !all_alerts) SnoozeActivity.snoozeForType(duration, SnoozeActivity.SnoozeType.HIGH_ALERTS, prefs);
+                    if (all_alerts) SnoozeActivity.snoozeForType(duration, SnoozeActivity.SnoozeType.ALL_ALERTS, prefs);
+                }
             }
         } catch (NullPointerException e) {
             Log.e(TAG, "Got exception trying to parse data from pebble: " + e);
