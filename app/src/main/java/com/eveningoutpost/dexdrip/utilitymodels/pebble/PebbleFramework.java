@@ -558,7 +558,7 @@ public class PebbleFramework extends PebbleDisplayAbstract {
                 if (data.contains(FRAMEWORK_BGL_VALUE)) {
                     long timestamp = data.getUnsignedIntegerAsLong(FRAMEWORK_BGL_VALUE);
                     //String trendPeriodString = PreferenceManager.getDefaultSharedPreferences(this.context).getString("pebble_trend_period", "3");
-                    String trendPeriodString = this.context.getApplicationContext().getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE).getString("pebble_trend_period", "3");
+                    String trendPeriodString = this.context.getApplicationContext().getSharedPreferences(context.getPackageName()+"_preferences", Context.MODE_PRIVATE).getString("pebble_trend_period", "3");
                     int trendPeriod = Integer.parseInt(trendPeriodString) + 1;
                     long interval = (DexCollectionType.getCurrentSamplePeriod() / (long) 1000);
                     int expectedItems = (int) ((int)trendPeriod * 3600) / (int)interval;
